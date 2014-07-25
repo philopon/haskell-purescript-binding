@@ -1,4 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TupleSections #-}
@@ -39,13 +40,14 @@ number  = prim "Number"
 boolean = prim "Boolean"
 string  = prim "String"
 
-class PureScriptType a where
+class PureScriptType (a :: k) where
     toPureScriptType :: proxy a -> PS.Type
-    pureScriptData   :: proxy a -> Maybe PS.Declaration
-    pureScriptData _ = Nothing
 
-instance PureScriptType a => PureScriptType (Maybe a) where
-    toPureScriptType _ = psTyCon ["Data", "Maybe"] "Maybe" `PS.TypeApp` toPureScriptType (Proxy :: Proxy a)
+class HasPureScriptDef (a :: k) where
+    pureScriptDef :: proxy a -> PS.Declaration
+
+instance PureScriptType Maybe where
+    toPureScriptType _ = psTyCon ["Data", "Maybe"] "Maybe"
 
 data PureScriptTypeHole
 instance PureScriptType PureScriptTypeHole where
@@ -82,16 +84,20 @@ PscType(TL.Text, string)
 
 --------------------------------------------------------------------------------
 psDataD :: TH.Dec -> TH.DecQ
-psDataD d = TH.funD 'pureScriptData [TH.clause [TH.wildP] (TH.normalB [| Just $(psDataE d) |]) []] 
+psDataD d = TH.funD 'pureScriptDef [TH.clause [TH.wildP] (TH.normalB $ psDataE d) []] 
 
 psDataE :: TH.Dec -> TH.ExpQ
-psDataE (TH.DataD [] name _ cons _) =
+psDataE (TH.DataD [] name vars cons _) =
     [|PS.DataDeclaration
         (PS.ProperName $(TH.stringE $ TH.nameBase name))
-        []
+        $(TH.listE $ map psDataTyVarE vars)
         $(TH.listE $ map psDataTyConE cons)
      |]
 psDataE a = fail $ "cannot convert Dec: " ++ show a
+
+psDataTyVarE :: TH.TyVarBndr -> TH.ExpQ
+psDataTyVarE (TH.PlainTV  n  ) = TH.stringE $ TH.nameBase n
+psDataTyVarE (TH.KindedTV n _) = TH.stringE $ TH.nameBase n
 
 psDataTyConE :: TH.Con -> TH.ExpQ
 psDataTyConE (TH.NormalC n ts) = do
@@ -107,54 +113,35 @@ psDataObjE vst = do
     [|PS.TypeApp $(TH.dataToExpQ (const Nothing) $ prim "Object") $rs|]
 
 psDataTypeE :: TH.Type -> TH.ExpQ
-psDataTypeE t = TH.recover (return False) (TH.isInstance ''PureScriptType [varToHole t]) >>= psDataTypeE'
-  where
-    psDataTypeE' True = [|toPureScriptType (Proxy :: Proxy $(return t))|]
-    psDataTypeE' False = case t of
-        (TH.AppT a b) -> [|PS.TypeApp $(psDataTypeE a) $(psDataTypeE b)|]
-        (TH.VarT   v) -> [|PS.TypeVar $ $(TH.stringE $ TH.nameBase v)|]
-        TH.ListT      -> [|prim "Array"|]
-        a             -> fail $ "cannot convert type: " ++ show a
+psDataTypeE = \case
+    (TH.AppT a b) -> [|PS.TypeApp $(psDataTypeE a) $(psDataTypeE b)|]
+    (TH.VarT   v) -> [|PS.TypeVar $ $(TH.stringE $ TH.nameBase v)|]
+    TH.ListT      -> [|prim "Array"|]
+    c@(TH.ConT _) -> do
+        b <- TH.recover (return False) (TH.isInstance ''PureScriptType [c])
+        if b
+            then [|toPureScriptType (Proxy :: Proxy $(return c))|]
+            else fail $ show c ++ " is not instance of PureScriptType."
 
-varToHole :: TH.Type -> TH.Type
-varToHole = everywhere (mkT f)
-  where
-    f (TH.VarT _) = TH.ConT ''PureScriptTypeHole
-    f a           = a
+    a             -> fail $ "cannot convert type: " ++ show a
 
 --------------------------------------------------------------------------------
 
 psTypeE :: TH.Dec -> TH.ExpQ
-psTypeE (TH.DataD [] name vs _ _) = do
-    st <- [|psTyCon [] $(TH.stringE $ TH.nameBase name)|]
-    foldlM ff st vs
-  where
-    ff b (TH.PlainTV i) = [|$(return b) `PS.TypeApp` toPureScriptType (Proxy :: Proxy $(TH.varT i)) |]
-    ff _ _              = fail "canot convert KindedTV."
-
+psTypeE (TH.DataD [] name _ _ _) = [|psTyCon [] $(TH.stringE $ TH.nameBase name)|]
 psTypeE a = fail $ "cannot convert Dec: " ++ show a
 
 psTypeD :: TH.Dec -> TH.DecQ
 psTypeD d = TH.funD 'toPureScriptType [TH.clause [TH.wildP] (TH.normalB $ psTypeE d) []] 
 
+psInstanceD :: TH.Dec -> TH.DecsQ
+psInstanceD d@(TH.DataD [] name _ _ _) = do
+    i <- TH.instanceD (return []) (TH.conT ''PureScriptType   `TH.appT` TH.conT name) [psTypeD d]
+    j <- TH.instanceD (return []) (TH.conT ''HasPureScriptDef `TH.appT` TH.conT name) [psDataD d]
+    return [i,j]
+psInstanceD a = fail $ "cannot convert Dec: " ++ show a
 
 --------------------------------------------------------------------------------
-
-psInstancePred :: TH.TyVarBndr -> TH.PredQ
-psInstancePred (TH.PlainTV n) = TH.classP ''PureScriptType [TH.varT n]
-psInstancePred _              = fail "canot convert KindedTV."
-
-psNameVars :: TH.Name -> [TH.TyVarBndr] -> TH.TypeQ
-psNameVars name = foldlM ff (TH.ConT name)
-  where
-    ff b (TH.PlainTV n) = return b `TH.appT` TH.varT n
-    ff _ _              = fail "canot convert KindedTV."
-
-psInstanceD :: TH.Dec -> TH.DecsQ
-psInstanceD d@(TH.DataD [] name vs _ _) = do
-    i <- TH.instanceD (mapM psInstancePred vs) (TH.conT ''PureScriptType `TH.appT` psNameVars name vs) [psTypeD d, psDataD d]
-    return [i]
-psInstanceD a = fail $ "cannot convert Dec: " ++ show a
 
 derivePureScript :: TH.Name -> TH.DecsQ
 derivePureScript name = TH.reify name >>= \case
