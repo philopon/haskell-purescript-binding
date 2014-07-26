@@ -49,52 +49,59 @@ tyVarBndrName (TH.PlainTV  n  ) = n
 tyVarBndrName (TH.KindedTV n _) = n
 
 --------------------------------------------------------------------------------
-
-class Typeable a => PureScriptType (a :: k) where
-    toPureScriptType :: proxy a -> PS.Type
+class PureScriptType (a :: k) where
+    toPureScriptType     :: proxy a -> PS.Type
+    pureScriptTypeString :: proxy a -> String
 
 instance PureScriptType Maybe where
-    toPureScriptType _ = psTyCon ["Data", "Maybe"] "Maybe"
+    toPureScriptType     _ = psTyCon ["Data", "Maybe"] "Maybe"
+    pureScriptTypeString _ = "Maybe"
 
 data PureScriptTypeHole deriving Typeable
 instance PureScriptType PureScriptTypeHole where
-    toPureScriptType _ = error "PureScriptTypeHole"
+    toPureScriptType     _ = error "PureScriptTypeHole"
+    pureScriptTypeString _ = "Hole"
 
-#define PscType(hs,psc) instance PureScriptType hs where toPureScriptType _ = psc
+#define PscType(hs,psc, str) instance PureScriptType hs where toPureScriptType _ = psc; pureScriptTypeString _ = str
 
-PscType(Int,     number)
-PscType(Int8,    number)
-PscType(Int16,   number)
-PscType(Int32,   number)
-PscType(Int64,   number)
-PscType(Integer, number)
+PscType(Int,     number, "Number")
+PscType(Int8,    number, "Number")
+PscType(Int16,   number, "Number")
+PscType(Int32,   number, "Number")
+PscType(Int64,   number, "Number")
+PscType(Integer, number, "Number")
 
-PscType(Word,   number)
-PscType(Word8,  number)
-PscType(Word16, number)
-PscType(Word32, number)
-PscType(Word64, number)
+PscType(Word,   number, "Number")
+PscType(Word8,  number, "Number")
+PscType(Word16, number, "Number")
+PscType(Word32, number, "Number")
+PscType(Word64, number, "Number")
 
-PscType(Double, number)
-PscType(Float,  number)
+PscType(Double, number, "Number")
+PscType(Float,  number, "Number")
 
-PscType(Sci.Scientific,  number)
+PscType(Sci.Scientific,  number, "Number")
 
-PscType(Bool, boolean)
+PscType(Bool, boolean, "Boolean")
 
-PscType(Char, string)
-PscType([Char], string)
-PscType(T.Text, string)
-PscType(TL.Text, string)
+PscType(Char,    string, "String")
+PscType([Char],  string, "String")
+PscType(T.Text,  string, "String")
+PscType(TL.Text, string, "String")
 
 #undef PscType
 
 --------------------------------------------------------------------------------
-
 class HasPureScript a where
-    declaration :: proxy a -> [(String, PS.Declaration)]
+    dataDeclaration    :: proxy a -> PS.Declaration
+    synonymDeclaration :: proxy a -> PS.Declaration
 
 --------------------------------------------------------------------------------
+psDataD :: TH.Dec -> TH.DecQ
+psDataD d =
+    TH.funD 'dataDeclaration 
+    [TH.clause [TH.wildP] (TH.normalB $ psDataE d) []] 
+
 psDataE :: TH.Dec -> TH.ExpQ
 psDataE (TH.DataD _ name vars cons _) =
     [|PS.DataDeclaration
@@ -131,12 +138,16 @@ psDataTypeE = \case
     a             -> fail $ "cannot convert type: " ++ show a
 
 --------------------------------------------------------------------------------
+psAliasD :: TH.Dec -> TH.DecQ
+psAliasD d =
+    TH.funD 'synonymDeclaration 
+    [TH.clause [TH.wildP] (TH.normalB $ psAliasE d) []] 
 
 psAliasE :: TH.Dec -> TH.ExpQ
 psAliasE (TH.DataD _ name vs _ _) = do
     i <- [|psTyCon [] $(TH.stringE $ TH.nameBase name)|]
     [|PS.TypeSynonymDeclaration 
-        (PS.ProperName $ $(TH.stringE $ TH.nameBase name) ++ '_' : ppTyNames $(psTypeRepE vs))
+        (PS.ProperName $ $(TH.stringE $ TH.nameBase name) ++ ppTyNames $(psTypeRepE vs))
         [] $(psAliasVarsE i vs)|]
 psAliasE a          = fail $ "cannot convert Dec: " ++ show a
 
@@ -145,17 +156,16 @@ psAliasVarsE = F.foldlM $ \b i ->
     [|$(return b) `PS.TypeApp` toPureScriptType (Proxy :: Proxy $(TH.varT $ tyVarBndrName i))|]
 
 psTypeRepE :: [TH.TyVarBndr] -> TH.ExpQ
-psTypeRepE = F.foldrM (\i b ->
-    [| typeOf (undefined :: $(TH.varT $ tyVarBndrName i)) : $(return b)|] ) (TH.ListE [])
+psTypeRepE = flip F.foldrM (TH.ListE []) $ \i b ->
+    [|pureScriptTypeString (Proxy :: Proxy $(TH.varT $ tyVarBndrName i)) : $(return b)|]
 
 --------------------------------------------------------------------------------
-
 psTypeE :: TH.Dec -> TH.ExpQ
 psTypeE (TH.DataD _ name _ _ _) = [|psTyCon [] $(TH.stringE $ TH.nameBase name)|]
 psTypeE a = fail $ "cannot convert Dec: " ++ show a
 
-psTypeD :: TH.Dec -> TH.DecQ
-psTypeD d = TH.funD 'toPureScriptType [TH.clause [TH.wildP] (TH.normalB $ psTypeE d) []] 
+psToTypeD :: TH.Dec -> TH.DecQ
+psToTypeD d = TH.funD 'toPureScriptType [TH.clause [TH.wildP] (TH.normalB $ psTypeE d) []] 
 
 psInstancePred :: TH.TyVarBndr -> TH.PredQ
 psInstancePred v = TH.classP ''PureScriptType [TH.varT $ tyVarBndrName v]
@@ -163,23 +173,21 @@ psInstancePred v = TH.classP ''PureScriptType [TH.varT $ tyVarBndrName v]
 psNameVars :: TH.Name -> [TH.TyVarBndr] -> TH.TypeQ
 psNameVars name = F.foldlM (\b v -> return b `TH.appT` TH.varT (tyVarBndrName v)) (TH.ConT name)
 
-ppTyNames :: [TypeRep] -> String
-ppTyNames = intercalate "_" . map show
+ppTyNames :: [String] -> String
+ppTyNames = ('_':) . intercalate "_"
+
+psTypeStrD :: TH.Dec -> TH.DecQ
+psTypeStrD (TH.DataD _ name _ _ _) = TH.funD 'pureScriptTypeString
+    [TH.clause [TH.wildP] (TH.normalB . TH.stringE $ TH.nameBase name) []]
+psTypeStrD a = fail $ "cannot convert Dec: " ++ show a
 
 --------------------------------------------------------------------------------
-psDataD :: TH.Dec -> TH.DecQ
-psDataD d@(TH.DataD _ name vs _ _) =
-    TH.funD 'declaration 
-    [TH.clause [TH.wildP] (TH.normalB [| 
-        [ ($(TH.stringE $ TH.nameBase name), $(psDataE d))
-        , ($(TH.stringE $ TH.nameBase name) ++ '_': ppTyNames $(psTypeRepE vs), $(psAliasE d))
-        ] |]) []] 
-psDataD a = fail $ "cannot convert Dec: " ++ show a
-
 psInstanceD :: TH.Dec -> TH.DecsQ
 psInstanceD d@(TH.DataD [] name vs _ _) = do
-    i <- TH.instanceD (return [])              (TH.conT ''PureScriptType `TH.appT` TH.conT    name)    [psTypeD d]
-    j <- TH.instanceD (mapM psInstancePred vs) (TH.conT ''HasPureScript  `TH.appT` psNameVars name vs) [psDataD d]
+    i <- TH.instanceD (return [])
+        (TH.conT ''PureScriptType `TH.appT` TH.conT name) [psToTypeD d, psTypeStrD d]
+    j <- TH.instanceD (mapM psInstancePred vs)
+        (TH.conT ''HasPureScript `TH.appT` psNameVars name vs) [psDataD d, psAliasD d]
     k <- deriveToJSON defaultOptions name
     return $ i:j:k
 psInstanceD TH.DataD{} = fail "cannot derive Data with context."
