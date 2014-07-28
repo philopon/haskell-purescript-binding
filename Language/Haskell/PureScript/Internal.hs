@@ -48,6 +48,9 @@ tyVarBndrName :: TH.TyVarBndr -> TH.Name
 tyVarBndrName (TH.PlainTV  n  ) = n
 tyVarBndrName (TH.KindedTV n _) = n
 
+fst3 :: (a,b,c) -> a
+fst3 (a,_,_) = a
+
 --------------------------------------------------------------------------------
 class PureScriptType (a :: k) where
     toPureScriptType     :: proxy a -> PS.Type
@@ -92,24 +95,44 @@ PscType(TL.Text, string, "String")
 #undef PscType
 
 --------------------------------------------------------------------------------
-class HasPureScript a where
-    dataDeclaration    :: proxy a -> PS.Declaration
-    synonymDeclaration :: proxy a -> PS.Declaration
+psTypeE :: TH.Name -> TH.ExpQ
+psTypeE name = [|psTyCon [] $(TH.stringE $ TH.nameBase name)|]
+
+psToTypeD :: TH.Name -> TH.DecQ
+psToTypeD n = TH.funD 'toPureScriptType [TH.clause [TH.wildP] (TH.normalB $ psTypeE n) []] 
+
+psInstancePred :: TH.TyVarBndr -> TH.PredQ
+psInstancePred v = TH.classP ''PureScriptType [TH.varT $ tyVarBndrName v]
+
+psNameVars :: TH.Name -> [TH.TyVarBndr] -> TH.TypeQ
+psNameVars name = F.foldlM (\b v -> return b `TH.appT` TH.varT (tyVarBndrName v)) (TH.ConT name)
+
+ppTyNames :: [String] -> String
+ppTyNames = ('_':) . intercalate "_"
+
+psTypeStrD :: TH.Name -> TH.DecQ
+psTypeStrD name = TH.funD 'pureScriptTypeString
+    [TH.clause [TH.wildP] (TH.normalB . TH.stringE $ TH.nameBase name) []]
 
 --------------------------------------------------------------------------------
-psDataD :: TH.Dec -> TH.DecQ
-psDataD d =
-    TH.funD 'dataDeclaration 
-    [TH.clause [TH.wildP] (TH.normalB $ psDataE d) []] 
+class HasPureScript (a :: *) where
+    dataDeclaration    :: proxy a -> PS.Declaration
+    synonymDeclaration :: proxy a -> PS.Declaration
+    foreignDeclaration :: proxy a -> PS.Declaration
 
-psDataE :: TH.Dec -> TH.ExpQ
-psDataE (TH.DataD _ name vars cons _) =
+--------------------------------------------------------------------------------
+psDataD :: TH.Name -> [TH.TyVarBndr] -> [TH.Con] -> TH.DecQ
+psDataD name vars cons =
+    TH.funD 'dataDeclaration 
+    [TH.clause [TH.wildP] (TH.normalB $ psDataE name vars cons) []] 
+
+psDataE :: TH.Name -> [TH.TyVarBndr] -> [TH.Con] -> TH.ExpQ
+psDataE name vars cons =
     [|PS.DataDeclaration
         (PS.ProperName $(TH.stringE $ TH.nameBase name))
         $(TH.listE $ map (TH.stringE . TH.nameBase . tyVarBndrName) vars)
         $(TH.listE $ map psDataTyConE cons)
      |]
-psDataE a = fail $ "cannot convert Dec: " ++ show a
 
 psDataTyConE :: TH.Con -> TH.ExpQ
 psDataTyConE (TH.NormalC n ts) = do
@@ -138,18 +161,17 @@ psDataTypeE = \case
     a             -> fail $ "cannot convert type: " ++ show a
 
 --------------------------------------------------------------------------------
-psAliasD :: TH.Dec -> TH.DecQ
-psAliasD d =
+psAliasD :: TH.Name -> [TH.TyVarBndr] -> TH.DecQ
+psAliasD name vs =
     TH.funD 'synonymDeclaration 
-    [TH.clause [TH.wildP] (TH.normalB $ psAliasE d) []] 
+    [TH.clause [TH.wildP] (TH.normalB $ psAliasE name vs) []] 
 
-psAliasE :: TH.Dec -> TH.ExpQ
-psAliasE (TH.DataD _ name vs _ _) = do
+psAliasE :: TH.Name -> [TH.TyVarBndr] -> TH.ExpQ
+psAliasE name vs = do
     i <- [|psTyCon [] $(TH.stringE $ TH.nameBase name)|]
     [|PS.TypeSynonymDeclaration 
         (PS.ProperName $ $(TH.stringE $ TH.nameBase name) ++ ppTyNames $(psTypeRepE vs))
         [] $(psAliasVarsE i vs)|]
-psAliasE a          = fail $ "cannot convert Dec: " ++ show a
 
 psAliasVarsE :: TH.Exp -> [TH.TyVarBndr] -> TH.ExpQ
 psAliasVarsE = F.foldlM $ \b i ->
@@ -160,34 +182,59 @@ psTypeRepE = flip F.foldrM (TH.ListE []) $ \i b ->
     [|pureScriptTypeString (Proxy :: Proxy $(TH.varT $ tyVarBndrName i)) : $(return b)|]
 
 --------------------------------------------------------------------------------
-psTypeE :: TH.Dec -> TH.ExpQ
-psTypeE (TH.DataD _ name _ _ _) = [|psTyCon [] $(TH.stringE $ TH.nameBase name)|]
-psTypeE a = fail $ "cannot convert Dec: " ++ show a
 
-psToTypeD :: TH.Dec -> TH.DecQ
-psToTypeD d = TH.funD 'toPureScriptType [TH.clause [TH.wildP] (TH.normalB $ psTypeE d) []] 
+foreignD :: TH.Name -> [TH.TyVarBndr] -> [TH.Con] -> TH.DecQ
+foreignD name vars cons = TH.funD 'foreignDeclaration
+    [TH.clause [TH.wildP] (TH.normalB $ foreignE name vars cons) []]
 
-psInstancePred :: TH.TyVarBndr -> TH.PredQ
-psInstancePred v = TH.classP ''PureScriptType [TH.varT $ tyVarBndrName v]
+foreignE :: TH.Name -> [TH.TyVarBndr] -> [TH.Con] -> TH.ExpQ
+foreignE name vars cons = 
+    [| PS.TypeInstanceDeclaration
+       (PS.Ident $(TH.stringE $ "readForeign" ++ TH.nameBase name))
+       $(foreignDepsE vars)
+       (qual ["Data", "Foreign"] (PS.ProperName "ReadForeign"))
+       [$(foreignTypeE name vars)]
+       [PS.ValueDeclaration (PS.Ident "read") PS.Value [] Nothing $(foreignExprE cons)]
 
-psNameVars :: TH.Name -> [TH.TyVarBndr] -> TH.TypeQ
-psNameVars name = F.foldlM (\b v -> return b `TH.appT` TH.varT (tyVarBndrName v)) (TH.ConT name)
+     |]
 
-ppTyNames :: [String] -> String
-ppTyNames = ('_':) . intercalate "_"
+foreignDepsE :: [TH.TyVarBndr] -> TH.ExpQ
+foreignDepsE vars = do
+    let l = TH.listE $ map (TH.stringE . TH.nameBase . tyVarBndrName) vars
+    [|map foreignDepsFn $l|]
 
-psTypeStrD :: TH.Dec -> TH.DecQ
-psTypeStrD (TH.DataD _ name _ _ _) = TH.funD 'pureScriptTypeString
-    [TH.clause [TH.wildP] (TH.normalB . TH.stringE $ TH.nameBase name) []]
-psTypeStrD a = fail $ "cannot convert Dec: " ++ show a
+foreignDepsFn :: String -> (PS.Qualified PS.ProperName, [PS.Type])
+foreignDepsFn s = (qual ["Data", "Foreign"] (PS.ProperName "ReadForeign"), [PS.TypeVar s])
+
+foreignTypeE :: TH.Name -> [TH.TyVarBndr] -> TH.ExpQ
+foreignTypeE name vars = do
+    s <- [| PS.TypeConstructor . qual [] $ PS.ProperName $(TH.stringE $ TH.nameBase name) |]
+    F.foldlM (\a i -> [|$(return a) `PS.TypeApp` PS.TypeVar $(TH.stringE . TH.nameBase $ tyVarBndrName i) |] ) s vars
+
+foreignExprE :: [TH.Con] -> TH.ExpQ
+foreignExprE [TH.RecC cst fs] = foreignExprSingleTaggedE cst (map fst3 fs)
+foreignExprE a = fail $ fail "cannot create Foreign instance: " ++ show a
+
+foreignExprSingleTaggedE :: TH.Name -> [TH.Name] -> TH.ExpQ
+foreignExprSingleTaggedE cst fs = do
+    let ifs = zip [0 :: Int ..] fs
+    let l = map (\(i, n) ->
+            [| PS.DoNotationBind 
+                   (PS.VarBinder $ PS.Ident $(TH.stringE $ 'v': show i))
+                   (PS.Var (qual ["Data", "Foreign"] (PS.Ident "prop")) `PS.App` PS.StringLiteral $(TH.stringE $ TH.nameBase n))
+             |] ) ifs
+    c <- [|PS.Constructor (qual [] (PS.ProperName $(TH.stringE $ TH.nameBase cst)))|]
+    let v = F.foldlM (\a (i,_) -> [|$(return a) `PS.App` PS.Var (qual [] (PS.Ident $(TH.stringE $ 'v': show i)))|]) c ifs
+    let r = [|PS.DoNotationValue (PS.Var (qual [] $ PS.Ident "return") `PS.App` PS.Parens $v )|]
+    [|PS.Do $(TH.listE $ l ++ [r]) |]
 
 --------------------------------------------------------------------------------
 psInstanceD :: TH.Dec -> TH.DecsQ
-psInstanceD d@(TH.DataD [] name vs _ _) = do
+psInstanceD (TH.DataD [] name vs cs _) = do
     i <- TH.instanceD (return [])
-        (TH.conT ''PureScriptType `TH.appT` TH.conT name) [psToTypeD d, psTypeStrD d]
+        (TH.conT ''PureScriptType `TH.appT` TH.conT name) [psToTypeD name, psTypeStrD name]
     j <- TH.instanceD (mapM psInstancePred vs)
-        (TH.conT ''HasPureScript `TH.appT` psNameVars name vs) [psDataD d, psAliasD d]
+        (TH.conT ''HasPureScript `TH.appT` psNameVars name vs) [psDataD name vs cs, psAliasD name vs, foreignD name vs cs]
     k <- deriveToJSON defaultOptions name
     return $ i:j:k
 psInstanceD TH.DataD{} = fail "cannot derive Data with context."
