@@ -1,0 +1,13 @@
+.cabal-sandbox*
+cabal.sandbox.config
+dist
+.DS_Store
+client_session_key.aes
+*.o
+*.hi
+*.dyn_o
+*.dyn_hi
+password
+*.swp
+examples/bower_components/
+bower_components
