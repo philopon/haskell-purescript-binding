@@ -1,23 +1,17 @@
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE TypeFamilies #-}
+module Language.PureScript.Binding
+    ( HasPureScript(..), PureScriptType(..)
+    , TList(..), Proxy(..)
+      -- * deriving
+    , derivePureScript, deriveDefaultPureScript
+      -- * modules
+    , mkModule, decls
+      -- * code generation
+    , GenerateConfig(..)
+    , generate, generateFile, generateFileDefault
+    ) where
 
 import Data.Proxy
-import Language.Haskell.TH
-import Language.Haskell.TH.Quote
-import Language.PureScript (Declaration)
-import Language.PureScript.Binding.TH
 import Language.PureScript.Binding.Class
+import Language.PureScript.Binding.TH
 import Language.PureScript.Binding.Dependency
-
-data A a = A (Maybe a) String
-data B   = B Double (A Double)
-data C = C (A Int) B
-
-derivePureScript ''A
-derivePureScript ''B
-derivePureScript ''C
-
-testA = decls (Proxy :: Proxy A) :: [Declaration]
-testB = decls (Proxy :: Proxy B) :: [Declaration]
-testC = decls (Proxy :: Proxy C) :: [Declaration]
+import Language.PureScript.Binding.Generation

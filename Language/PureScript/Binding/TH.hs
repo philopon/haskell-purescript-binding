@@ -1,5 +1,6 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -19,10 +20,10 @@ import Language.PureScript.Binding.Class
 import Language.PureScript.Binding.Dependency
 
 import Data.Proxy
+import Data.Aeson.TH
 import qualified Data.Foldable as F
 
 --------------------------------------------------------------------------------
-
 tyVarBndrName :: TH.TyVarBndr -> TH.Name
 tyVarBndrName (TH.PlainTV  n  ) = n
 tyVarBndrName (TH.KindedTV n _) = n
@@ -46,6 +47,12 @@ depTypes = \case
     c -> do
         b <- TH.recover (return False) (TH.isInstance ''HasPureScript [c])
         return $ if b then [c] else []
+
+conName :: TH.Con -> TH.Name
+conName (TH.NormalC   n _) = n
+conName (TH.RecC      n _) = n
+conName (TH.InfixC  _ n _) = n
+conName (TH.ForallC _ _ c) = conName c
 
 --------------------------------------------------------------------------------
 -- | type instance Deps Name = '[Name']
@@ -113,22 +120,184 @@ dataDeclObjE vst = do
     let rs = F.foldrM (\(n,_,t) a -> [|PS.RCons $(TH.stringE $ TH.nameBase n) $(typeToPsTypeE t) $(return a)|]) ini vst
     [|PS.TypeApp $(TH.dataToExpQ (const Nothing) $ prim "Object") $rs|]
 
-hasPureScriptD :: TH.Name -> [TH.TyVarBndr] -> [TH.Con] -> TH.DecQ
-hasPureScriptD name vars cons = TH.instanceD (return []) (TH.conT ''HasPureScript `TH.appT` TH.conT name)
-    [ dataDeclD name vars cons ]
+--------------------------------------------------------------------------------
+-- | FromJSON autoNameFromJSON :: FromJSON Name where
+--       parseJSON 
 
+-- TypeInstanceDeclaration Ident [(Qualified ProperName, [Type])] (Qualified ProperName) [Type] [Declaration]
+
+foreignDeclD :: Options -> TH.Name -> [TH.TyVarBndr] -> [TH.Con] -> TH.DecQ
+foreignDeclD opts name vars cons = TH.funD 'foreignDecl
+    [TH.clause [TH.wildP] (TH.normalB $ foreignDeclE opts name vars cons) []] 
+
+foreignDeclE :: Options -> TH.Name -> [TH.TyVarBndr] -> [TH.Con] -> TH.ExpQ
+foreignDeclE opts name vars cons = do
+    con <- [|PS.TypeConstructor (qual [] $ PS.ProperName $(TH.stringE $ TH.nameBase name))|]
+    let fromJSON = [|json (PS.ProperName "FromJSON")|]
+    [|PS.TypeInstanceDeclaration
+        (PS.Ident $(TH.stringE $ "auto" ++ TH.nameBase name ++ "FromJSON"))
+        $(TH.listE $ map (\v -> [|($fromJSON, [PS.TypeVar $(TH.stringE . TH.nameBase $ tyVarBndrName v)])|]) vars)
+        $fromJSON
+        [$(F.foldlM (\b i -> [|$(return b) `PS.TypeApp` PS.TypeVar $(TH.stringE . TH.nameBase $ tyVarBndrName i) |]) con vars)]
+        $(foreignFunE opts cons)
+     |]
+
+psFail :: String -> TH.ExpQ
+psFail s = [|PS.Var (json $ PS.Ident "fail") `PS.App` PS.StringLiteral $(TH.stringE s)|]
+
+parseFail :: TH.ExpQ
+parseFail = [|PS.CaseAlternative [PS.NullBinder] Nothing $(psFail "parse failed")|]
+
+localVar :: String -> TH.ExpQ
+localVar s = [| PS.Var . qual [] $ PS.Ident $(TH.stringE s) |]
+
+json :: a -> PS.Qualified a
+json = qual ["Data", "JSON"]
+
+parseJSON :: [PS.Binder] -> PS.Value -> PS.Declaration
+parseJSON b = PS.ValueDeclaration (PS.Ident "parseJSON") PS.Value b Nothing
+
+constructor :: [String] -> String -> TH.ExpQ
+constructor q c = [|PS.Constructor (qual $(TH.listE $ map TH.stringE q) $ PS.ProperName $(TH.stringE c))|]
+
+objBinder :: String -> TH.ExpQ
+objBinder var = do
+    let obj = [|json $ PS.ProperName "Object"|]
+    [| PS.ConstructorBinder $obj [PS.VarBinder $ PS.Ident $(TH.stringE var)] |]
+
+-- case input of
+--     Array [v1,v2 ..] -> do
+--         v1' <- parseJSON v1
+--         v2' <- parseJSON v2
+--         ...
+--         return (Con v1 v2 ..)
+--     _ -> fail ""
+foreignSingleFunE :: Options -> TH.Con -> TH.ExpQ
+foreignSingleFunE _ (TH.NormalC c ts) = do
+    let is  = take (length ts) [0::Int ..]
+        bs  = TH.listE $ map (\i -> [|PS.VarBinder $ PS.Ident $(TH.stringE $ 'v': show i)|]) is
+        doB = map (\i -> [|PS.DoNotationBind (PS.VarBinder $ PS.Ident $(TH.stringE $ 'v': show i ++ "'"))
+            (PS.Var (json $ PS.Ident "parseJSON") `PS.App` $(localVar $ 'v': show i))
+            |]) is
+        ar = [|json $ PS.ProperName "Array"|]
+    cn <- constructor [] (TH.nameBase c)
+    let v   = F.foldlM (\b i -> [|$(return b) `PS.App` $(localVar $ 'v': show i ++ "'")|]) cn is
+        ret = [| PS.DoNotationValue $ $(localVar "return") `PS.App` $v|]
+    [| PS.Case [$(localVar "input")]
+        [ PS.CaseAlternative [PS.ConstructorBinder $ar [PS.ArrayBinder $bs]] Nothing (PS.Do $(TH.listE $ doB ++ [ret]))
+        , $parseFail
+        ]
+     |]
+
+-- case input of
+--     Object obj -> do
+--         aa <- obj .: "a"
+--         ab <- obj .: "b"
+--         return (Con {aa: aa, ab: ab})
+--     _ -> fail ""
+foreignSingleFunE Options{fieldLabelModifier = f} (TH.RecC c fs) = do
+    let vs  = map (\(n, _, _) -> TH.nameBase n) fs
+        doB = map (\v -> [|PS.DoNotationBind (PS.VarBinder $ PS.Ident $(TH.stringE v)) $
+                PS.BinaryNoParens (json $ PS.Op ".:") $(localVar "obj") (PS.StringLiteral $(TH.stringE $ f v))
+             |]) vs
+        ol  = [| PS.ObjectLiteral $(TH.listE $ map (\v -> [|($(TH.stringE v), $(localVar v))|]) vs) |]
+        ret = [| PS.DoNotationValue $ $(localVar "return") `PS.App` ($(constructor [] $ TH.nameBase c) `PS.App` $ol) |]
+    [| PS.Case [$(localVar "input")]
+        [ PS.CaseAlternative [$(objBinder "obj")]
+            Nothing (PS.Do $(TH.listE $ doB ++ [ret]))
+        , $parseFail
+        ]
+     |]
+
+foreignSingleFunE _ c = fail $ "cannot convert Con: " ++ show c
+
+letTaggedInput :: Options -> String -> TH.Con -> TH.ExpQ
+letTaggedInput opt content r@(TH.NormalC _ _) =
+    [| PS.Case [PS.BinaryNoParens (json $ PS.Op ".:") $(localVar "object") (PS.StringLiteral $(TH.stringE content))]
+       [ PS.CaseAlternative
+           [ PS.ConstructorBinder (qual ["Data", "Either"] $ PS.ProperName "Right") [PS.VarBinder $ PS.Ident "input"] ]
+           Nothing $(foreignSingleFunE opt r)
+       , $parseFail
+       ]
+     |]
+letTaggedInput opt _ r@(TH.RecC _ _) =
+    [| PS.Let [PS.ValueDeclaration (PS.Ident "input") PS.Value [] Nothing $
+       PS.Constructor (json $ PS.ProperName "Object") `PS.App` $(localVar "object")]
+       $(foreignSingleFunE opt r)
+     |]
+letTaggedInput _ _ _ = fail "cannot use InfixC, ForallC."
+
+foreignFunE :: Options -> [TH.Con] -> TH.ExpQ
+foreignFunE opt [r] =
+    [|[parseJSON [PS.VarBinder $ PS.Ident "input"] $(foreignSingleFunE opt r)]|]
+
+foreignFunE opt@Options{sumEncoding = TaggedObject {..}, .. } rs = do
+    let ca = map (\r -> [|PS.CaseAlternative
+            [ PS.ConstructorBinder (qual ["Data", "Either"] $ PS.ProperName "Right")
+                [ PS.StringBinder $(TH.stringE . constructorTagModifier . TH.nameBase $ conName r) ]
+            ] Nothing $(letTaggedInput opt contentsFieldName r)|]) rs
+    [|[ parseJSON [$(objBinder "object")] $ PS.Case
+            [PS.BinaryNoParens (json $ PS.Op ".:") $(localVar "object") $ PS.StringLiteral $(TH.stringE tagFieldName)]
+            $(TH.listE $ ca ++ [parseFail])
+        ]|]
+
+foreignFunE opt@Options{sumEncoding = TwoElemArray, .. } rs = do
+    let ca = map (\r -> [|PS.CaseAlternative
+            [ PS.ConstructorBinder (qual ["Data", "Either"] $ PS.ProperName "Right")
+                [ PS.ConstructorBinder (qual ["Data", "Tuple"] $ PS.ProperName "Tuple")
+                    [ PS.StringBinder $(TH.stringE . constructorTagModifier . TH.nameBase $ conName r)
+                    , PS.VarBinder (PS.Ident "input")
+                    ]
+                ]
+            ] Nothing $(foreignSingleFunE opt r)|]) rs
+    [|[ parseJSON [PS.VarBinder $ PS.Ident "iTuple"] $ PS.Case
+            [PS.Var (json $ PS.Ident "parseJSON") `PS.App` $(localVar "iTuple")]
+            $(TH.listE $ ca ++ [parseFail])
+        ]|]
+
+foreignFunE opt@Options{sumEncoding = ObjectWithSingleField, .. } rs = do
+    let ca = map (\r -> [|PS.CaseAlternative
+            [ PS.ArrayBinder
+                [ PS.ConstructorBinder (qual ["Data", "Tuple"] $ PS.ProperName "Tuple")
+                    [ PS.StringBinder $(TH.stringE . constructorTagModifier . TH.nameBase $ conName r)
+                    , PS.VarBinder (PS.Ident "input")
+                    ]
+                ]
+            ] Nothing $(foreignSingleFunE opt r)|]) rs
+    [|[ parseJSON [$(objBinder "object")] $ PS.Case
+            [PS.Var (qual ["Data", "Map"] $ PS.Ident "toList") `PS.App` $(localVar "object")]
+            $(TH.listE $ ca ++ [parseFail])
+        ]|]
 --------------------------------------------------------------------------------
 
-declaration :: TH.Dec -> TH.DecsQ
-declaration (TH.DataD _ name vars cons _) = do
+declRefsD :: TH.Name -> TH.DecQ
+declRefsD name = TH.funD 'declRefs
+    [TH.clause [TH.wildP] (TH.normalB $ declRefsE name) []] 
+
+declRefsE :: TH.Name -> TH.ExpQ
+declRefsE name =
+    [|[ PS.TypeInstanceRef (PS.Ident $(TH.stringE $ "auto" ++ TH.nameBase name ++ "FromJSON"))
+      , PS.TypeRef (PS.ProperName $(TH.stringE $ TH.nameBase name)) Nothing]
+     |]
+
+--------------------------------------------------------------------------------
+hasPureScriptD :: Options -> TH.Name -> [TH.TyVarBndr] -> [TH.Con] -> TH.DecQ
+hasPureScriptD opts name vars cons = TH.instanceD (return []) (TH.conT ''HasPureScript `TH.appT` TH.conT name)
+    [dataDeclD name vars cons, foreignDeclD opts name vars cons, declRefsD name]
+
+declaration :: Options -> TH.Dec -> TH.DecsQ
+declaration opts (TH.DataD _ name vars cons _) = do
     deps <- depsD name cons
     typ  <- pureScriptTypeInstanceD name
-    has  <- hasPureScriptD name vars cons
+    has  <- hasPureScriptD opts name vars cons
     return [deps, typ, has]
-declaration (TH.NewtypeD cxt name vars con der) = declaration (TH.DataD cxt name vars [con] der)
-declaration a          = fail $ "cannot convert Dec: " ++ show a
+declaration opts (TH.NewtypeD cxt name vars con der) = declaration opts (TH.DataD cxt name vars [con] der)
+declaration _ a          = fail $ "cannot convert Dec: " ++ show a
 
-derivePureScript :: TH.Name -> TH.DecsQ
-derivePureScript name = TH.reify name >>= \case
-    TH.TyConI d -> declaration d
+derivePureScript :: Options -> TH.Name -> TH.DecsQ
+derivePureScript opt name = TH.reify name >>= \case
+    TH.TyConI d -> declaration opt d
     i           -> fail $ "cannot convert Info: " ++ show i
+
+deriveDefaultPureScript :: TH.Name -> TH.DecsQ
+deriveDefaultPureScript = derivePureScript defaultOptions
