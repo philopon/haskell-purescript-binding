@@ -1,7 +1,8 @@
 name:                haskell-purescript-binding
 version:             0.1.0
 synopsis:            generate purescript code from haskell code.
--- description:         
+description:         
+  example: <https://github.com/philopon/haskell-purescript-binding/blob/master/examples/example.hs>
 license:             MIT
 license-file:        LICENSE
 author:              HirotomoMoriwaki
