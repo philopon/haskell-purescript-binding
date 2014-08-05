@@ -6,298 +6,216 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Language.PureScript.Binding.TH where
 
 import Control.Applicative
 
-import qualified Language.Haskell.TH as TH
-import qualified Language.Haskell.TH.Syntax as TH
-import qualified Language.Haskell.TH.Quote  as TH
-import qualified Language.PureScript as PS
+import Language.Haskell.TH as TH
 import Language.PureScript.Binding.Class
 import Language.PureScript.Binding.Dependency
 
+import Data.List
 import Data.Proxy
 import Data.Aeson.TH
-import qualified Data.Foldable as F
 
 --------------------------------------------------------------------------------
-tyVarBndrName :: TH.TyVarBndr -> TH.Name
-tyVarBndrName (TH.PlainTV  n  ) = n
-tyVarBndrName (TH.KindedTV n _) = n
+tyVarBndrName :: TyVarBndr -> Name
+tyVarBndrName (PlainTV  n  ) = n
+tyVarBndrName (KindedTV n _) = n
 
-typeToPsTypeE :: TH.Type -> TH.ExpQ
+typeToPsTypeE :: Type -> ExpQ
 typeToPsTypeE = \case
-    (TH.AppT a b) -> [|PS.TypeApp $(typeToPsTypeE a) $(typeToPsTypeE b)|]
-    (TH.VarT   v) -> [|PS.TypeVar $(TH.stringE $ TH.nameBase v)|]
-    TH.ListT      -> [|prim "Array"|]
-    TH.TupleT n | n == 2    -> [|psTyCon ["Data", "Tuple"] "Tuple"|]
+    (AppT ListT a) -> [|'[' : $(typeToPsTypeE a) ++ "]"|]
+    (AppT     a b) -> [|'(' : $(typeToPsTypeE a) ++ ' ': $(typeToPsTypeE b) ++ ")"|]
+    (VarT       v) -> stringE $ nameBase v
+    TupleT n | n == 2    -> stringE "Data.Tuple.Tuple"
                 | otherwise -> fail $ "2-tuple only."
     c             -> do
-        b <- TH.recover (return False) (TH.isInstance ''PureScriptType [c])
+        b <- recover (return False) (isInstance ''PureScriptType [c])
         if b
             then [|toPureScriptType (Proxy :: Proxy $(return c))|]
             else fail $ show c ++ " is not instance of PureScriptType."
 
-depTypes :: TH.Type -> TH.Q [TH.Type]
+depTypes :: Type -> Q [Type]
 depTypes = \case
-    (TH.AppT a b) -> (++) <$> depTypes a <*> depTypes b
+    (AppT a b) -> (++) <$> depTypes a <*> depTypes b
     c -> do
-        b <- TH.recover (return False) (TH.isInstance ''HasPureScript [c])
+        b <- recover (return False) (isInstance ''HasPureScript [c])
         return $ if b then [c] else []
 
-conName :: TH.Con -> TH.Name
-conName (TH.NormalC   n _) = n
-conName (TH.RecC      n _) = n
-conName (TH.InfixC  _ n _) = n
-conName (TH.ForallC _ _ c) = conName c
+conName :: Con -> Name
+conName (NormalC   n _) = n
+conName (RecC      n _) = n
+conName (InfixC  _ n _) = n
+conName (ForallC _ _ c) = conName c
 
 --------------------------------------------------------------------------------
 -- | type instance Deps Name = '[Name']
 
-depsD :: TH.Name -> [TH.Con] -> TH.DecQ
+depsD :: Name -> [Con] -> DecQ
 depsD name cons = do
     let ts = concatMap fn cons
     deps <- concat <$> mapM depTypes ts
-    let r = foldr (\i b -> (TH.PromotedT '(:-) `TH.AppT` i `TH.AppT` b)) (TH.PromotedT 'TNil) deps
-    TH.tySynInstD ''Deps $ TH.tySynEqn [TH.conT name] (return r)
+    let r = foldr (\i b -> (PromotedT '(:-) `AppT` i `AppT` b)) (PromotedT 'TNil) deps
+    tySynInstD ''Deps $ tySynEqn [conT name] (return r)
   where
-    fn (TH.NormalC  _ ts) = map snd ts
-    fn (TH.RecC     _ ts) = map (\(_,_,t) -> t) ts
-    fn (TH.InfixC  a _ b) = snd a : snd b : []
-    fn (TH.ForallC _ _ c) = fn c
+    fn (NormalC  _ ts) = map snd ts
+    fn (RecC     _ ts) = map (\(_,_,t) -> t) ts
+    fn (InfixC  a _ b) = snd a : snd b : []
+    fn (ForallC _ _ c) = fn c
 --------------------------------------------------------------------------------
 -- | instance PureScriptType Name where
---       toPureScriptType _ = psTyCon [] "Name"
---       pureScriptString _ = "Name"
+--       toPureScriptType _ = "Name"
 
-toPureScriptTypeD :: TH.Name -> TH.DecQ
-toPureScriptTypeD n =
-    TH.funD 'toPureScriptType [TH.clause [TH.wildP] (TH.normalB $ toPureScriptTypeE n) []]
+toPureScriptTypeD :: Name -> DecQ
+toPureScriptTypeD n = funD 'toPureScriptType
+    [clause [wildP] (normalB . stringE $ nameBase n) []]
 
-toPureScriptTypeE :: TH.Name -> TH.ExpQ
-toPureScriptTypeE n = [|psTyCon [] $(TH.stringE $ TH.nameBase n)|]
-
-pureScriptTypeStringD :: TH.Name -> TH.DecQ
-pureScriptTypeStringD n = TH.funD 'pureScriptTypeString
-    [TH.clause [TH.wildP] (TH.normalB . TH.stringE $ TH.nameBase n) []]
-
-pureScriptTypeInstanceD :: TH.Name -> TH.DecQ
-pureScriptTypeInstanceD n = TH.instanceD (return []) (TH.conT ''PureScriptType `TH.appT` TH.conT n)
-    [toPureScriptTypeD n, pureScriptTypeStringD n]
+pureScriptTypeInstanceD :: Name -> DecQ
+pureScriptTypeInstanceD n = instanceD (return []) (conT ''PureScriptType `appT` conT n)
+    [toPureScriptTypeD n]
 
 --------------------------------------------------------------------------------
 -- | dataDecl _ = PS.DataDeclaration Name [v1, v2 ..] [(C1, [c1t1, c1t2 ..])]
 
-dataDeclD :: TH.Name -> [TH.TyVarBndr] -> [TH.Con] -> TH.DecQ
-dataDeclD name vars cons =
-    TH.funD 'dataDecl
-    [TH.clause [TH.wildP] (TH.normalB $ dataDeclE name vars cons) []] 
+dataDeclStringD :: Name -> [TyVarBndr] -> [Con] -> DecQ
+dataDeclStringD name vars cons = funD 'dataDeclString
+    [clause [wildP] (normalB $ dataDeclStringE name vars cons) []] 
 
-dataDeclE :: TH.Name -> [TH.TyVarBndr] -> [TH.Con] -> TH.ExpQ
-dataDeclE name vars cons =
-    [|PS.DataDeclaration
-        (PS.ProperName $(TH.stringE $ TH.nameBase name))
-        $(TH.listE $ map (TH.stringE . TH.nameBase . tyVarBndrName) vars)
-        $(TH.listE $ map dataDeclTyConE cons)
-     |]
+dataDeclStringE :: Name -> [TyVarBndr] -> [Con] -> ExpQ
+dataDeclStringE name vars cons =
+    let cls = zipWith dataDeclConStringE ("    = " : repeat "    | ") cons
+        fl  = unwords
+              ("data" : nameBase name : map (nameBase . tyVarBndrName) vars)
+    in [|unlines $ $(stringE fl) : $(listE cls)|]
 
-dataDeclTyConE :: TH.Con -> TH.ExpQ
-dataDeclTyConE (TH.NormalC n ts) = do
-    let l = TH.listE $ map (\(_,t) -> typeToPsTypeE t) ts
-    [|(PS.ProperName $(TH.stringE $ TH.nameBase n), $l)|]
+dataDeclConStringE :: String -> Con -> ExpQ
+dataDeclConStringE p (NormalC n ts) =
+    let e = listE $ map (typeToPsTypeE . snd) ts
+    in [|$(stringE $ p ++ nameBase n ++ " ") ++ unwords $e |]
 
-dataDeclTyConE (TH.RecC    n ts) = do
-    [|(PS.ProperName $(TH.stringE $ TH.nameBase n), $(TH.listE [dataDeclObjE ts]))|]
-
-dataDeclTyConE c = fail $ "cannot convert Con: " ++ show c
-
-dataDeclObjE :: [(TH.VarStrictType)] -> TH.ExpQ
-dataDeclObjE vst = do
-    ini <- [|PS.REmpty|]
-    let rs = F.foldrM (\(n,_,t) a -> [|PS.RCons $(TH.stringE $ TH.nameBase n) $(typeToPsTypeE t) $(return a)|]) ini vst
-    [|PS.TypeApp $(TH.dataToExpQ (const Nothing) $ prim "Object") $rs|]
+dataDeclConStringE p (RecC    n ts) =
+    let e = listE $ map (\(c,_,t) -> [|$(stringE $ nameBase c ++ " :: ") ++ $(typeToPsTypeE t)|]) ts
+    in [| $(stringE $ p ++ nameBase n ++ " {") ++ intercalate ", " $e ++ "}" |]
+    
+dataDeclConStringE _ InfixC{}  = fail "cannot use infix data constructor."
+dataDeclConStringE _ ForallC{} = fail "cannot use existential quantification."
 
 --------------------------------------------------------------------------------
 -- | FromJSON autoNameFromJSON :: FromJSON Name where
 --       parseJSON 
 
--- TypeInstanceDeclaration Ident [(Qualified ProperName, [Type])] (Qualified ProperName) [Type] [Declaration]
+foreignDeclStringD :: Options -> Name -> [TyVarBndr] -> [Con] -> DecQ
+foreignDeclStringD opts name vars cons = funD 'foreignDeclString
+    [clause [wildP] (normalB $ foreignDeclStringE opts name vars cons) []] 
 
-foreignDeclD :: Options -> TH.Name -> [TH.TyVarBndr] -> [TH.Con] -> TH.DecQ
-foreignDeclD opts name vars cons = TH.funD 'foreignDecl
-    [TH.clause [TH.wildP] (TH.normalB $ foreignDeclE opts name vars cons) []] 
-
-foreignDeclE :: Options -> TH.Name -> [TH.TyVarBndr] -> [TH.Con] -> TH.ExpQ
-foreignDeclE opts name vars cons = do
-    con <- [|PS.TypeConstructor (qual [] $ PS.ProperName $(TH.stringE $ TH.nameBase name))|]
-    let fromJSON = [|json (PS.ProperName "FromJSON")|]
-    [|PS.TypeInstanceDeclaration
-        (PS.Ident $(TH.stringE $ "auto" ++ TH.nameBase name ++ "FromJSON"))
-        $(TH.listE $ map (\v -> [|($fromJSON, [PS.TypeVar $(TH.stringE . TH.nameBase $ tyVarBndrName v)])|]) vars)
-        $fromJSON
-        [$(F.foldlM (\b i -> [|$(return b) `PS.TypeApp` PS.TypeVar $(TH.stringE . TH.nameBase $ tyVarBndrName i) |]) con vars)]
-        $(foreignFunE opts cons)
-     |]
-
-psFail :: String -> TH.ExpQ
-psFail s = [|PS.Var (json $ PS.Ident "fail") `PS.App` PS.StringLiteral $(TH.stringE s)|]
-
-parseFail :: TH.ExpQ
-parseFail = [|PS.CaseAlternative [PS.NullBinder] Nothing $(psFail "parse failed")|]
-
-localVar :: String -> TH.ExpQ
-localVar s = [| PS.Var . qual [] $ PS.Ident $(TH.stringE s) |]
-
-json :: a -> PS.Qualified a
-json = qual ["Data", "JSON"]
-
-parseJSON :: [PS.Binder] -> PS.Value -> PS.Declaration
-parseJSON b = PS.ValueDeclaration (PS.Ident "parseJSON") PS.Value b Nothing
-
-constructor :: [String] -> String -> TH.ExpQ
-constructor q c = [|PS.Constructor (qual $(TH.listE $ map TH.stringE q) $ PS.ProperName $(TH.stringE c))|]
-
-objBinder :: String -> TH.ExpQ
-objBinder var = do
-    let obj = [|json $ PS.ProperName "Object"|]
-    [| PS.ConstructorBinder $obj [PS.VarBinder $ PS.Ident $(TH.stringE var)] |]
-
--- case input of
---     Array [v1,v2 ..] -> do
---         v1' <- parseJSON v1
---         v2' <- parseJSON v2
---         ...
---         return (Con v1 v2 ..)
---     _ -> fail ""
-foreignSingleFunE :: Options -> TH.Con -> TH.ExpQ
-foreignSingleFunE _ (TH.NormalC c ts) = do
-    let is  = take (length ts) [0::Int ..]
-        bs  = TH.listE $ map (\i -> [|PS.VarBinder $ PS.Ident $(TH.stringE $ 'v': show i)|]) is
-        doB = map (\i -> [|PS.DoNotationBind (PS.VarBinder $ PS.Ident $(TH.stringE $ 'v': show i ++ "'"))
-            (PS.Var (json $ PS.Ident "parseJSON") `PS.App` $(localVar $ 'v': show i))
-            |]) is
-        ar = [|json $ PS.ProperName "Array"|]
-    cn <- constructor [] (TH.nameBase c)
-    let v   = F.foldlM (\b i -> [|$(return b) `PS.App` $(localVar $ 'v': show i ++ "'")|]) cn is
-        ret = [| PS.DoNotationValue $ $(localVar "return") `PS.App` $v|]
-    [| PS.Case [$(localVar "input")]
-        [ PS.CaseAlternative [PS.ConstructorBinder $ar [PS.ArrayBinder $bs]] Nothing (PS.Do $(TH.listE $ doB ++ [ret]))
-        , $parseFail
+foreignDeclStringE :: Options -> Name -> [TyVarBndr] -> [Con] -> ExpQ
+foreignDeclStringE opts name vars cons = do
+    let hdr = concat 
+            [ "instance auto", nameBase name, "FromJSON :: "
+            , foreignDeclStringCxt vars
+            , "Data.JSON.FromJSON ", foreignDeclStringName name vars, "where"]
+    stringE $ intercalate "\n"
+        [ hdr
+        , foreignDeclStringFun opts cons
         ]
-     |]
 
--- case input of
---     Object obj -> do
---         aa <- obj .: "a"
---         ab <- obj .: "b"
---         return (Con {aa: aa, ab: ab})
---     _ -> fail ""
-foreignSingleFunE Options{fieldLabelModifier = f} (TH.RecC c fs) = do
-    let vs  = map (\(n, _, _) -> TH.nameBase n) fs
-        doB = map (\v -> [|PS.DoNotationBind (PS.VarBinder $ PS.Ident $(TH.stringE v)) $
-                PS.BinaryNoParens (json $ PS.Op ".:") $(localVar "obj") (PS.StringLiteral $(TH.stringE $ f v))
-             |]) vs
-        ol  = [| PS.ObjectLiteral $(TH.listE $ map (\v -> [|($(TH.stringE v), $(localVar v))|]) vs) |]
-        ret = [| PS.DoNotationValue $ $(localVar "return") `PS.App` ($(constructor [] $ TH.nameBase c) `PS.App` $ol) |]
-    [| PS.Case [$(localVar "input")]
-        [ PS.CaseAlternative [$(objBinder "obj")]
-            Nothing (PS.Do $(TH.listE $ doB ++ [ret]))
-        , $parseFail
-        ]
-     |]
+foreignDeclStringName :: Name -> [TyVarBndr] -> String
+foreignDeclStringName n []   = nameBase n ++ " "
+foreignDeclStringName n vars = '(' : nameBase n ++ ' ': intercalate " " (map (nameBase . tyVarBndrName) vars) ++ ") "
 
-foreignSingleFunE _ c = fail $ "cannot convert Con: " ++ show c
+foreignDeclStringCxt :: [TyVarBndr] -> String
+foreignDeclStringCxt []   = ""
+foreignDeclStringCxt vars =
+    '(' : intercalate ", " (map (\v -> "Data.JSON.FromJSON " ++ nameBase (tyVarBndrName v)) vars) ++ ") => "
 
-letTaggedInput :: Options -> String -> TH.Con -> TH.ExpQ
-letTaggedInput opt content r@(TH.NormalC _ _) =
-    [| PS.Case [PS.BinaryNoParens (json $ PS.Op ".:") $(localVar "object") (PS.StringLiteral $(TH.stringE content))]
-       [ PS.CaseAlternative
-           [ PS.ConstructorBinder (qual ["Data", "Either"] $ PS.ProperName "Right") [PS.VarBinder $ PS.Ident "input"] ]
-           Nothing $(foreignSingleFunE opt r)
-       , $parseFail
-       ]
-     |]
-letTaggedInput opt _ r@(TH.RecC _ _) =
-    [| PS.Let [PS.ValueDeclaration (PS.Ident "input") PS.Value [] Nothing $
-       PS.Constructor (json $ PS.ProperName "Object") `PS.App` $(localVar "object")]
-       $(foreignSingleFunE opt r)
-     |]
-letTaggedInput _ _ _ = fail "cannot use InfixC, ForallC."
+sp :: Int -> String
+sp i = replicate (4 * i) ' '
 
-foreignFunE :: Options -> [TH.Con] -> TH.ExpQ
-foreignFunE opt [r] =
-    [|[parseJSON [PS.VarBinder $ PS.Ident "input"] $(foreignSingleFunE opt r)]|]
+foreignDeclStringSingleFun :: Options -> Int -> Con -> String
+foreignDeclStringSingleFun _ i (NormalC n t) =
+    let vs   = map (('v':) . show) $ take (length t) [ 0 :: Int .. ]
+        cse  = sp  i      ++ "case input of"
+        rit  = sp (i + 1) ++ "Data.JSON.Array [" ++ intercalate "," vs ++ "] -> do"
+        pf v = sp (i + 2) ++ v ++ "' <- Data.JSON.parseJSON " ++ v
+        ret  = sp (i + 2) ++ "return (" ++ nameBase n ++ ' ': intercalate "' " vs ++ "')"
+        lft  = sp (i + 1) ++ "_ -> Data.JSON.fail \"cannot parse.\""
+    in intercalate "\n" $ cse : rit : map pf vs ++ [ret, lft]
 
-foreignFunE opt@Options{sumEncoding = TaggedObject {..}, .. } rs = do
-    let ca = map (\r -> [|PS.CaseAlternative
-            [ PS.ConstructorBinder (qual ["Data", "Either"] $ PS.ProperName "Right")
-                [ PS.StringBinder $(TH.stringE . constructorTagModifier . TH.nameBase $ conName r) ]
-            ] Nothing $(letTaggedInput opt contentsFieldName r)|]) rs
-    [|[ parseJSON [$(objBinder "object")] $ PS.Case
-            [PS.BinaryNoParens (json $ PS.Op ".:") $(localVar "object") $ PS.StringLiteral $(TH.stringE tagFieldName)]
-            $(TH.listE $ ca ++ [parseFail])
-        ]|]
+foreignDeclStringSingleFun Options{..} i (RecC n t) =
+    let cse  = sp  i      ++ "case input of"
+        rit  = sp (i + 1) ++ "Data.JSON.Object object -> do"
+        pf v = sp (i + 2) ++ v ++ " <- Data.JSON.(.:) object \"" ++ fieldLabelModifier v ++ "\""
+        ret  = sp (i + 2) ++ "return (" ++ nameBase n ++ " {" ++ intercalate ", "
+            (map (\(c,_,_) -> nameBase c ++ ": " ++ nameBase c) t) ++ "})"
+        lft  = sp (i + 1) ++ "_ -> Data.JSON.fail \"cannot parse.\""
+    in intercalate "\n" $ cse : rit : map (\(c,_,_) -> pf $ nameBase c) t ++ [ret, lft]
 
-foreignFunE opt@Options{sumEncoding = TwoElemArray, .. } rs = do
-    let ca = map (\r -> [|PS.CaseAlternative
-            [ PS.ConstructorBinder (qual ["Data", "Either"] $ PS.ProperName "Right")
-                [ PS.ConstructorBinder (qual ["Data", "Tuple"] $ PS.ProperName "Tuple")
-                    [ PS.StringBinder $(TH.stringE . constructorTagModifier . TH.nameBase $ conName r)
-                    , PS.VarBinder (PS.Ident "input")
-                    ]
-                ]
-            ] Nothing $(foreignSingleFunE opt r)|]) rs
-    [|[ parseJSON [PS.VarBinder $ PS.Ident "iTuple"] $ PS.Case
-            [PS.Var (json $ PS.Ident "parseJSON") `PS.App` $(localVar "iTuple")]
-            $(TH.listE $ ca ++ [parseFail])
-        ]|]
+foreignDeclStringSingleFun _ _ InfixC{}  = error "cannot use infix data constructor."
+foreignDeclStringSingleFun _ _ ForallC{} = error "cannot use existential quantification."
 
-foreignFunE opt@Options{sumEncoding = ObjectWithSingleField, .. } rs = do
-    let ca = map (\r -> [|PS.CaseAlternative
-            [ PS.ArrayBinder
-                [ PS.ConstructorBinder (qual ["Data", "Tuple"] $ PS.ProperName "Tuple")
-                    [ PS.StringBinder $(TH.stringE . constructorTagModifier . TH.nameBase $ conName r)
-                    , PS.VarBinder (PS.Ident "input")
-                    ]
-                ]
-            ] Nothing $(foreignSingleFunE opt r)|]) rs
-    [|[ parseJSON [$(objBinder "object")] $ PS.Case
-            [PS.Var (qual ["Data", "Map"] $ PS.Ident "toList") `PS.App` $(localVar "object")]
-            $(TH.listE $ ca ++ [parseFail])
-        ]|]
---------------------------------------------------------------------------------
+foreignDeclStringFun :: Options -> [Con] -> String
+foreignDeclStringFun opts [con] = unlines [sp 1 ++ "parseJSON input =", foreignDeclStringSingleFun opts 2 con]
+foreignDeclStringFun opt@Options{sumEncoding = TaggedObject {..}, .. } rs =
+    let fl   = sp 1 ++ "parseJSON (Data.JSON.Object obj) = case Data.JSON.(.:) obj \"" ++ tagFieldName ++ "\" of"
+        ca c@(NormalC n _) = unlines
+            [ sp 2 ++ "Data.Either.Right \"" ++ constructorTagModifier (nameBase n) ++
+                "\" -> case Data.JSON.(.:) obj \"" ++ contentsFieldName ++ "\" of"
+            , sp 3 ++ "Data.Either.Right input ->"
+            , foreignDeclStringSingleFun opt 4 c
+            , sp 3 ++ "_ -> Data.JSON.fail \"cannot parse.\""
+            ]
+        ca c@(RecC n _)    = unlines
+            [ sp 2 ++ "Data.Either.Right \"" ++ constructorTagModifier (nameBase n) ++
+                "\" -> let input = Data.JSON.Object obj in"
+            , foreignDeclStringSingleFun opt 3 c
+            ]
+        ca InfixC{}  = error "cannot use infix data constructor."
+        ca ForallC{} = error "cannot use existential quantification."
 
-declRefsD :: TH.Name -> TH.DecQ
-declRefsD name = TH.funD 'declRefs
-    [TH.clause [TH.wildP] (TH.normalB $ declRefsE name) []] 
+        fil  = sp 2 ++ "_ -> Data.JSON.fail \"cannot parse.\""
+        fbk  = sp 1 ++ "parseJSON _ = Data.JSON.fail \"cannot parse.\""
+    in intercalate "\n" $ fl : map ca rs ++ [fil, fbk]
 
-declRefsE :: TH.Name -> TH.ExpQ
-declRefsE name =
-    [|[ PS.TypeInstanceRef (PS.Ident $(TH.stringE $ "auto" ++ TH.nameBase name ++ "FromJSON"))
-      , PS.TypeRef (PS.ProperName $(TH.stringE $ TH.nameBase name)) Nothing]
-     |]
+foreignDeclStringFun opt@Options{sumEncoding = TwoElemArray, .. } rs =
+    let fl   = sp 1 ++ "parseJSON array = case Data.JSON.parseJSON array of"
+        ca c = unlines
+            [ sp 2 ++ "Data.Either.Right (Data.Tuple.Tuple \"" ++
+                constructorTagModifier (nameBase $ conName c) ++ "\" input) ->"
+            , foreignDeclStringSingleFun opt 3 c
+            ]
+        fil  = sp 2 ++ "_ -> Data.JSON.fail \"cannot parse.\""
+    in intercalate "\n" $ fl : map ca rs ++ [fil]
 
---------------------------------------------------------------------------------
-hasPureScriptD :: Options -> TH.Name -> [TH.TyVarBndr] -> [TH.Con] -> TH.DecQ
-hasPureScriptD opts name vars cons = TH.instanceD (return []) (TH.conT ''HasPureScript `TH.appT` TH.conT name)
-    [dataDeclD name vars cons, foreignDeclD opts name vars cons, declRefsD name]
+foreignDeclStringFun opt@Options{sumEncoding = ObjectWithSingleField, .. } rs =
+    let fl   = sp 1 ++ "parseJSON (Data.JSON.Object obj) = case Data.Map.toList obj of"
+        ca c = unlines
+            [ sp 2 ++ "[Data.Tuple.Tuple \"" ++
+                constructorTagModifier (nameBase $ conName c) ++ "\" input] ->"
+            , foreignDeclStringSingleFun opt 3 c
+            ]
+        fil  = sp 2 ++ "_ -> Data.JSON.fail \"cannot parse.\""
+        fbk  = sp 1 ++ "parseJSON _ = Data.JSON.fail \"cannot parse.\""
+    in intercalate "\n" $ fl : map ca rs ++ [fil, fbk]
 
-declaration :: Options -> TH.Dec -> TH.DecsQ
-declaration opts (TH.DataD _ name vars cons _) = do
+hasPureScriptD :: Options -> Name -> [TyVarBndr] -> [Con] -> DecQ
+hasPureScriptD opts name vars cons = instanceD (return []) (conT ''HasPureScript `appT` conT name)
+    [dataDeclStringD name vars cons, foreignDeclStringD opts name vars cons]
+
+declaration :: Options -> Dec -> DecsQ
+declaration opts (DataD _ name vars cons _) = do
     deps <- depsD name cons
     typ  <- pureScriptTypeInstanceD name
     has  <- hasPureScriptD opts name vars cons
     return [deps, typ, has]
-declaration opts (TH.NewtypeD cxt name vars con der) = declaration opts (TH.DataD cxt name vars [con] der)
+declaration opts (NewtypeD cnxt name vars con der) = declaration opts (DataD cnxt name vars [con] der)
 declaration _ a          = fail $ "cannot convert Dec: " ++ show a
 
-derivePureScript :: Options -> TH.Name -> TH.DecsQ
-derivePureScript opt name = TH.reify name >>= \case
-    TH.TyConI d -> declaration opt d
+derivePureScript :: Options -> Name -> DecsQ
+derivePureScript opt name = reify name >>= \case
+    TyConI d -> declaration opt d
     i           -> fail $ "cannot convert Info: " ++ show i
 
-deriveDefaultPureScript :: TH.Name -> TH.DecsQ
+deriveDefaultPureScript :: Name -> DecsQ
 deriveDefaultPureScript = derivePureScript defaultOptions
