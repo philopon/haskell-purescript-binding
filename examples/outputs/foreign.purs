@@ -3,28 +3,33 @@ module Foreign where
 import Data.JSON ()
 
 data C
-    = C1 {a :: A, name :: String}
+    = C1 {a :: A, name :: String, admin :: Boolean}
     | C2 Number B
 
 instance autoCFromJSON :: Data.JSON.FromJSON C where
-    parseJSON array = case Data.JSON.parseJSON array of
-        Data.Either.Right (Data.Tuple.Tuple "C1" input) ->
+    parseJSON (Data.JSON.Object obj) = case Data.JSON.(.:) obj "tag" of
+        Data.Either.Right "C1" -> let input = Data.JSON.Object obj in
             case input of
                 Data.JSON.Object object -> do
                     a <- Data.JSON.(.:) object "a"
                     name <- Data.JSON.(.:) object "name"
-                    return (C1 {a: a, name: name})
+                    admin <- Data.JSON.(.:) object "admin"
+                    return (C1 {a: a, name: name, admin: admin})
                 _ -> Data.JSON.fail "cannot parse."
 
-        Data.Either.Right (Data.Tuple.Tuple "C2" input) ->
-            case input of
-                Data.JSON.Array [v0,v1] -> do
-                    v0' <- Data.JSON.parseJSON v0
-                    v1' <- Data.JSON.parseJSON v1
-                    return (C2 v0' v1')
-                _ -> Data.JSON.fail "cannot parse."
+        Data.Either.Right "C2" -> case Data.JSON.(.:) obj "contents" of
+            Data.Either.Right input ->
+                case input of
+                    Data.JSON.Array [v0,v1] -> do
+                        v0' <- Data.JSON.parseJSON v0
+                        v1' <- Data.JSON.parseJSON v1
+                        return (C2 v0' v1')
+                    _ -> Data.JSON.fail "cannot parse."
+            _ -> Data.JSON.fail "cannot parse."
 
         _ -> Data.JSON.fail "cannot parse."
+    parseJSON _ = Data.JSON.fail "cannot parse."
+
 data D a
     = D a
 
