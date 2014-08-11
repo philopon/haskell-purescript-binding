@@ -16,7 +16,7 @@ cabal-version:       >=1.10
 library
   exposed-modules:     Language.PureScript.Binding
                        Language.PureScript.Binding.Class
-                       Language.PureScript.Binding.Dependency
+  other-modules:       Language.PureScript.Binding.Dependency
                        Language.PureScript.Binding.TH
   build-depends:       base               >=4.7 && <4.8
                      , template-haskell   >=2.9 && <2.10
