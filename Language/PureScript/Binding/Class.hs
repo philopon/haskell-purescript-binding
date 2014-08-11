@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE Rank2Types #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -15,12 +16,13 @@ module Language.PureScript.Binding.Class where
 
 import Data.Int
 import Data.Word
+import Data.Text.Lazy.Builder
 import qualified Data.Scientific as Sci
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 
 class PureScriptType (a :: k) where
-    toPureScriptType     :: proxy a -> String
+    toPureScriptType     :: proxy a -> T.Text
 
 instance PureScriptType Maybe where
     toPureScriptType _ = "Maybe"
@@ -53,3 +55,7 @@ PscType(T.Text,  "String")
 PscType(TL.Text, "String")
 
 #undef PscType
+
+class HasPureScript a where
+    dataDecl    :: proxy a -> Builder
+    foreignDecl :: proxy a -> Builder
