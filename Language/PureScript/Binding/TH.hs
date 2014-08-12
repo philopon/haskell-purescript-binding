@@ -152,7 +152,7 @@ foreignDeclSingleFun :: Options -> Int -> Con -> String
 foreignDeclSingleFun _ i (NormalC n t) =
     let vs   = map (('v':) . show) $ take (length t) [ 0 :: Int .. ]
         cse  = sp  i      ++ "case input of"
-        rit  = sp (i + 1) ++ "Data.JSON.Array [" ++ intercalate "," vs ++ "] -> do"
+        rit  = sp (i + 1) ++ "Data.JSON.JArray [" ++ intercalate "," vs ++ "] -> do"
         pf v = sp (i + 2) ++ v ++ "' <- Data.JSON.parseJSON " ++ v
         ret  = sp (i + 2) ++ "return (" ++ nameBase n ++ ' ': intercalate "' " vs ++ "')"
         lft  = sp (i + 1) ++ "_ -> Data.JSON.fail \"cannot parse.\""
@@ -160,7 +160,7 @@ foreignDeclSingleFun _ i (NormalC n t) =
 
 foreignDeclSingleFun Options{..} i (RecC n t) =
     let cse  = sp  i      ++ "case input of"
-        rit  = sp (i + 1) ++ "Data.JSON.Object object -> do"
+        rit  = sp (i + 1) ++ "Data.JSON.JObject object -> do"
         pf v = sp (i + 2) ++ v ++ " <- Data.JSON.(.:) object \"" ++ fieldLabelModifier v ++ "\""
         ret  = sp (i + 2) ++ "return (" ++ nameBase n ++ " {" ++ intercalate ", "
             (map (\(c,_,_) -> nameBase c ++ ": " ++ nameBase c) t) ++ "})"
@@ -173,7 +173,7 @@ foreignDeclSingleFun _ _ ForallC{} = error "cannot use existential quantificatio
 foreignDeclFun :: Options -> [Con] -> String
 foreignDeclFun opts [con] = unlines [sp 1 ++ "parseJSON input =", foreignDeclSingleFun opts 2 con]
 foreignDeclFun opt@Options{sumEncoding = TaggedObject {..}, .. } rs =
-    let fl   = sp 1 ++ "parseJSON (Data.JSON.Object obj) = case Data.JSON.(.:) obj \"" ++ tagFieldName ++ "\" of"
+    let fl   = sp 1 ++ "parseJSON (Data.JSON.JObject obj) = case Data.JSON.(.:) obj \"" ++ tagFieldName ++ "\" of"
         ca c@(NormalC n _) = unlines
             [ sp 2 ++ "Data.Either.Right \"" ++ constructorTagModifier (nameBase n) ++
                 "\" -> case Data.JSON.(.:) obj \"" ++ contentsFieldName ++ "\" of"
@@ -183,7 +183,7 @@ foreignDeclFun opt@Options{sumEncoding = TaggedObject {..}, .. } rs =
             ]
         ca c@(RecC n _)    = unlines
             [ sp 2 ++ "Data.Either.Right \"" ++ constructorTagModifier (nameBase n) ++
-                "\" -> let input = Data.JSON.Object obj in"
+                "\" -> let input = Data.JSON.JObject obj in"
             , foreignDeclSingleFun opt 3 c
             ]
         ca InfixC{}  = error "cannot use infix data constructor."
@@ -204,7 +204,7 @@ foreignDeclFun opt@Options{sumEncoding = TwoElemArray, .. } rs =
     in unlines $ fl : map ca rs ++ [fil]
 
 foreignDeclFun opt@Options{sumEncoding = ObjectWithSingleField, .. } rs =
-    let fl   = sp 1 ++ "parseJSON (Data.JSON.Object obj) = case Data.Map.toList obj of"
+    let fl   = sp 1 ++ "parseJSON (Data.JSON.JObject obj) = case Data.Map.toList obj of"
         ca c = unlines
             [ sp 2 ++ "[Data.Tuple.Tuple \"" ++
                 constructorTagModifier (nameBase $ conName c) ++ "\" input] ->"
