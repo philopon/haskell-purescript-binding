@@ -2,4 +2,4 @@ haskell-purescript-binding
 ====
 generate purescript code from haskell code.
 
-please read [example](./examples/example.hs).
+please read [example](./examples/).
